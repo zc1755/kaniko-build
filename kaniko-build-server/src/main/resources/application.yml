@@ -1,0 +1,40 @@
+spring:
+  datasource:
+    url: jdbc:mysql://192.168.95.1:3306/kaniko_build?useUnicode=true&characterEncoding=utf-8&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
+  jpa:
+    #   禁用数据库连接复用
+    open-in-view: false
+    hibernate:
+      ddl-auto: update
+      naming:
+        implicit-strategy: org.springframework.boot.orm.jpa.hibernate.SpringImplicitNamingStrategy
+        physical-strategy: org.hibernate.boot.model.naming.PhysicalNamingStrategyStandardImpl
+    database-platform: org.hibernate.dialect.MySQL57InnoDBDialect
+
+seecoder-build-server:
+  kaniko:
+    namespace: default
+    kaniko-image: bitnami/kaniko:latest
+    docker-registry: 192.168.95.1:8092/
+    cache-repo: 192.168.95.1:8092/kaniko-cache
+    registry-mirror: dockerhub.xianfish.site
+    secret-name: regcred
+    maven-cache-path: /var/maven-cache/repository
+    gitlab-credentials: gitlab-credentials
+    thread-pool-size: 5
+    k8s:
+      apiServer: https://192.168.95.1:6443 # Kubernetes API Server 地址
+      token: eyJhbGciOiJSUzI1NiIsImtpZCI6IjFDTjZ0czVmSGdqMmNWdzJxOXkxd0kwOTNXUUFiNk1kRG5WNkhMTkJLeUkifQ.eyJpc3MiOiJrdWJlcm5ldGVzL3NlcnZpY2VhY2NvdW50Iiwia3ViZXJuZXRlcy5pby9zZXJ2aWNlYWNjb3VudC9uYW1lc3BhY2UiOiJrdWJlLXN5c3RlbSIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VjcmV0Lm5hbWUiOiJhZG1bbi10b2tlbi1iYmY0YiIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50Lm5hbWUiOiJhZG1pbiIsImt1YmVybmV0ZXMuaW8vc2VydmljZWFjY291bnQvc2VydmljZS1hY2NvdW50LnVpZCI6IjdhZWQ0MWQ3LTRmZTUtNDdiYi1iOGMzLWYwZDk0ZDBlNTYyOSIsInN1YiI6InN5c3RlbTpzZXJ2aWNlYWNjb3VudDprdWJlLXN5c3RlbTphZG1pbiJ9.EPlY21DiIQWwILnq4xtQCbvwcgfRgqSjx-P7o9BRg-GHBtKqiYnlyWK4rhy829Ia_Yn-O8312_rXl84WYlIxXsbFTXNTuciv3PO1zkoIumUvAIUBVqfDhVxvIrHKkugJrXhpvS5QLNoKxxiBmYSO_wOBuPh6OJFVtP7qc4ulLI-f9bZ11czms9wZIkNJ14gMNnrwK15gulwctv8_lxvdeOv-R9o85qhw2yq9y_lIwHFbTda3tVmFw-jnN9pMMvqov-lI3Zdns__tDt0F4Uk6SHxXVIMftMh0DpLQhrqt_M9S_SBCFY09SyYQS93pbNim4g-ARNxvuqVGf5xZJPfK_A # 从 Kubernetes 生成的 token
+      validateSSL: false                   # 是否验证 SSL
+      debug: false                         # 是否开启调试
+#    imageRegistry: "172.29.7.145:18082"  # 镜像注册中心
+#    secretName: "kaniko-secret"          # Kubernetes 中用于认证的 Secret 名称
+
+rocketmq:
+  name-server: 192.168.95.1:9876
+  producer:
+    group: kaniko-build-group
+    send-message-timeout: 10000  # 默认 3 秒，改成 10 秒
+    retry-times-when-send-failed: 3  # 失败后重试 3 次
