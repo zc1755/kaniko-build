@@ -7,7 +7,7 @@ import org.springframework.context.annotation.Configuration;
 @Data
 @Configuration
 @ConfigurationProperties(prefix = "seecoder-build-server.kaniko")
-public class KanikoUtil {
+public class ApplicationProperties {
     private String namespace;
     private String kanikoImage;
     private String dockerRegistry;
@@ -17,6 +17,8 @@ public class KanikoUtil {
     private String mavenCachePath;
     private String gitlabCredentials;
     private int threadPoolSize;
+    private int maxConcurrent;
+    private int timeoutSeconds;
     private K8s k8s = new K8s();            // Kubernetes 配置信息
     @Data
     public static class K8s {

@@ -1,4 +1,4 @@
-package com.nju.edu.util;
+package com.nju.edu.util.kubernetes;
 
 import io.fabric8.kubernetes.api.model.ConfigMap;
 import io.fabric8.kubernetes.api.model.ConfigMapBuilder;

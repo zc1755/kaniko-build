@@ -1,11 +1,8 @@
 package com.nju.edu.web.controller.api;
 
-import com.nju.edu.entities.GitDTO;
 import com.nju.edu.entities.KanikoDTO;
 import com.nju.edu.model.Response;
-import com.nju.edu.resp.ResultData;
 import com.nju.edu.service.BuildService;
-import com.nju.edu.vo.BuildResultVO;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;

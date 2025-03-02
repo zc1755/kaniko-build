@@ -1,5 +1,6 @@
-package com.nju.edu.util;
+package com.nju.edu.util.kubernetes;
 
+import com.nju.edu.util.ApplicationProperties;
 import io.fabric8.kubernetes.client.Config;
 import io.fabric8.kubernetes.client.ConfigBuilder;
 import io.fabric8.kubernetes.client.DefaultKubernetesClient;
@@ -13,7 +14,7 @@ import javax.annotation.Resource;
 public class KubernetesConfig {
 
     @Resource
-    KanikoUtil kanikoUtil;
+    ApplicationProperties kanikoUtil;
 
     @Bean
     public KubernetesClient kubernetesClient() {

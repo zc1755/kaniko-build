@@ -4,63 +4,85 @@ import com.nju.edu.dao.KanikoBuildLogDAO;
 import com.nju.edu.entities.KanikoDTO;
 import com.nju.edu.entity.KanikoBuildLog;
 import com.nju.edu.service.BuildService;
-import com.nju.edu.util.KanikoUtil;
-import com.nju.edu.util.PodManager;
+import com.nju.edu.util.ApplicationProperties;
+import com.nju.edu.util.SemaphoreRateLimiter;
+import com.nju.edu.util.ServiceException;
+import com.nju.edu.util.kubernetes.ConfigMapManager;
+import com.nju.edu.util.kubernetes.PodManager;
 import com.nju.edu.vo.BuildResultVO;
-import io.fabric8.kubernetes.api.model.*;
 import io.fabric8.kubernetes.client.KubernetesClient;
+import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
 import java.time.LocalDateTime;
-import java.util.*;
-import java.util.concurrent.ExecutorService;
+import java.util.Optional;
 
 @Service
 public class BuildServiceImpl implements BuildService {
 
     @Resource
-    private KanikoUtil kanikoUtil;
+    private ApplicationProperties applicationProperties;
 
     @Resource
     private KubernetesClient client;
-
-    @Resource
-    private ExecutorService executorService;
 
     @Resource
     private PodManager podManager;
 
     @Resource
     private KanikoBuildLogDAO kanikoBuildLogDAO;
-
+    @Resource
+    private SemaphoreRateLimiter semaphoreRateLimiter;
+    @Resource
+    private ConfigMapManager configMapManager;
     @Override
     public void startBuild(KanikoDTO kanikoDTO) {
         String podName = podManager.generatePodName();
-        String[] configMapNames = podManager.prepareConfigMaps(kanikoDTO);
-        // 创建 Pod 并启动监控
-        podManager.createAndMonitorPod(podName, kanikoDTO, configMapNames);
-        // 检查是否存在相同的镜像名
-        Optional<KanikoBuildLog> existingLog = kanikoBuildLogDAO.findByImageName(kanikoDTO.getImageName());
-        KanikoBuildLog log;
+        boolean podStarted = false;
+        if (kanikoDTO == null) {
+            throw  new ServiceException("400", "请求参数不能为空");
+        }
+        if (!semaphoreRateLimiter.tryAcquire()) {
+            System.out.println("资源不足，构建请求被限流：" + kanikoDTO.getImageName());
+            throw new ServiceException("429", "当前并发构建任务已达上限，请稍后重试");
+        }
+        try{
+            String[] configMapNames = prepareConfigMaps(kanikoDTO);
+            podManager.createAndMonitorPod(podName, kanikoDTO, configMapNames);
+            podStarted = true;
 
-        if (existingLog.isPresent()) {
-            // 更新已有记录
-            log = existingLog.get();
-            log.setPodName(podName);
-            log.setBuildStatus(KanikoBuildLog.BuildStatus.PENDING);
-            log.setLog(null); // 清空旧的日志
-            log.setUpdatedAt(LocalDateTime.now());
-        } else {
-            // 创建新记录
-            log = new KanikoBuildLog();
-            log.setImageName(kanikoDTO.getImageName());
-            log.setPodName(podName);
-            log.setBuildStatus(KanikoBuildLog.BuildStatus.PENDING);
+            Optional<KanikoBuildLog> existingLog = kanikoBuildLogDAO.findByImageName(kanikoDTO.getImageName());
+            KanikoBuildLog log;
+            if (existingLog.isPresent()) {
+                // 更新已有记录
+                log = existingLog.get();
+                log.setPodName(podName);
+                log.setBuildStatus(KanikoBuildLog.BuildStatus.PENDING);
+                log.setLog(null); // 清空旧的日志
+                log.setUpdatedAt(LocalDateTime.now());
+            } else {
+                // 创建新记录
+                log = new KanikoBuildLog();
+                log.setImageName(kanikoDTO.getImageName());
+                log.setPodName(podName);
+                log.setBuildStatus(KanikoBuildLog.BuildStatus.PENDING);
+            }
+            // 保存记录
+            kanikoBuildLogDAO.save(log);
+        } catch (DataAccessException e) {
+            if (!podStarted) {
+                semaphoreRateLimiter.release();
+            }
+            throw new ServiceException("500", "数据库异常：" + e.getMessage());
+
+        } catch (Exception e) {
+            if (!podStarted) {
+                semaphoreRateLimiter.release();
+            }
+            throw new ServiceException("500", "服务器内部错误：" + e.getMessage());
         }
 
-        // 保存记录
-        kanikoBuildLogDAO.save(log);
 
     }
 
@@ -78,11 +100,37 @@ public class BuildServiceImpl implements BuildService {
             }else {
                 resultVO.setBuildStatus(String.valueOf(log.getBuildStatus()));
                 String podName = log.getPodName();
-                String logStr = podManager.queryLog(podName,kanikoUtil.getNamespace());
+                String logStr = podManager.queryLog(podName, applicationProperties.getNamespace());
                 resultVO.setLog(logStr);
             }
         }
         return resultVO;
     }
-
+    private String[] prepareConfigMaps(KanikoDTO kanikoDTO) {
+        String[] configMapNames = new String[2];
+        if (isNotEmpty(kanikoDTO.getConfigMapContent())) {
+            try {
+                configMapNames[0] = configMapManager.createConfigMap(
+                        kanikoDTO.getConfigMapContentName(),
+                        kanikoDTO.getConfigMapContent(),
+                        applicationProperties.getNamespace());
+            } catch (Exception e) {
+                throw new ServiceException("500", "创建 ConfigMap 失败：" + e.getMessage());
+            }
+        }
+        if (isNotEmpty(kanikoDTO.getDockerfileContent())) {
+            try {
+                configMapNames[1] = configMapManager.createConfigMap(
+                        "Dockerfile",
+                        kanikoDTO.getDockerfileContent(),
+                        applicationProperties.getNamespace());
+            } catch (Exception e) {
+                throw new ServiceException("500", "创建 Dockerfile ConfigMap 失败：" + e.getMessage());
+            }
+        }
+        return configMapNames;
+    }
+    private boolean isNotEmpty(String str) {
+        return str != null && !str.isEmpty();
+    }
 }

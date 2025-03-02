@@ -1,8 +1,11 @@
-package com.nju.edu.util;
+package com.nju.edu.util.kubernetes;
 
 import com.nju.edu.dao.KanikoBuildLogDAO;
 import com.nju.edu.entities.KanikoDTO;
 import com.nju.edu.entity.KanikoBuildLog;
+import com.nju.edu.util.ApplicationProperties;
+import com.nju.edu.util.RocketMQProducer;
+import com.nju.edu.util.SemaphoreRateLimiter;
 import io.fabric8.kubernetes.api.model.*;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientException;
@@ -21,7 +24,7 @@ public class PodManager {
     KubernetesClient client;
 
     @Resource
-    private KanikoUtil kanikoUtil;
+    private ApplicationProperties applicationProperties;
 
     @Resource
     private ConfigMapManager configMapManager;
@@ -32,26 +35,19 @@ public class PodManager {
     @Resource
     private RocketMQProducer rocketMQProducer;
 
+    @Resource
+    private SemaphoreRateLimiter semaphoreRateLimiter;
     private static final String TOPIC = "kaniko-build-topic";
 
     private final ConcurrentHashMap<String, Watch> watchMap = new ConcurrentHashMap<>();
 
-    public String[] prepareConfigMaps(KanikoDTO kanikoDTO) {
-        String[] configMapNames = new String[2];
-        if (isNotEmpty(kanikoDTO.getConfigMapContent())) {
-            configMapNames[0] = configMapManager.createConfigMap(kanikoDTO.getConfigMapContentName(), kanikoDTO.getConfigMapContent(), kanikoUtil.getNamespace());
-        }
-        if (isNotEmpty(kanikoDTO.getDockerfileContent())) {
-            configMapNames[1] = configMapManager.createConfigMap("Dockerfile", kanikoDTO.getDockerfileContent(), kanikoUtil.getNamespace());
-        }
-        return configMapNames;
-    }
+
     public void createAndMonitorPod(String podName,KanikoDTO kanikoDTO, String[] configMapNames) {
         Pod pod = createKanikoPod(podName, configMapNames, kanikoDTO);
-        client.pods().inNamespace(kanikoUtil.getNamespace()).create(pod);
+        client.pods().inNamespace(applicationProperties.getNamespace()).create(pod);
 
         // 启动监听
-        watchPodStatus(kanikoDTO.getImageName(), podName, kanikoUtil.getNamespace(),configMapNames);
+        watchPodStatus(kanikoDTO.getImageName(), podName, applicationProperties.getNamespace(),configMapNames);
     }
     public String queryLog(String podName, String namespace){
         String logs = "";
@@ -77,24 +73,32 @@ public class PodManager {
             Watch watch = client.pods().inNamespace(namespace).withName(podName).watch(new Watcher<Pod>() {
                 @Override
                 public void eventReceived(Action action, Pod pod) {
-
+                    Watch watch;
                     PodStatus status = pod.getStatus();
                     String phase = status.getPhase();
                     // 根据 Pod 状态进行处理
                     switch (phase) {
                         case "Succeeded":
+                            watch = watchMap.remove(podName);
+                            if(watch==null){
+                                return;
+                            }
                             System.out.println("Pod " + podName + " finished successfully.");
                             String successLog = "Image built successfully.";
                             updateBuildStatus(podName, KanikoBuildLog.BuildStatus.SUCCESS, successLog);
-
-                            notifySuccess(imageName, podName, namespace, configMapNames);
+                            clearResources(configMapNames,podName,namespace,watch);
+                            notifySuccess(imageName);
                             break;
                         case "Failed":
-                            System.out.println("Pod " + podName + "   failed.");
+                            watch = watchMap.remove(podName);
+                            if(watch==null){
+                                return;
+                            }
+                            System.out.println("Pod " + podName + "  failed.");
                             String failureLog = queryLog(podName, namespace); // 获取详细失败日志
                             updateBuildStatus(podName, KanikoBuildLog.BuildStatus.FAILED, failureLog);
-
-                            notifyFailure(imageName, podName, namespace, configMapNames);
+                            clearResources(configMapNames,podName,namespace,watch);
+                            notifyFailure(imageName);
                             break;
                         case "Running":
                             System.out.println("Pod " + podName + " is running.");
@@ -103,10 +107,12 @@ public class PodManager {
                     }
                 }
 
-                //为了处理那些未显式关闭而出现错误或连接中断的情况
                 @Override
                 public void onClose(KubernetesClientException cause) {
-                    System.out.println("Watcher closed: " + cause.getMessage());
+                    System.out.println("手动关闭watch");
+                    if (cause != null) {
+                        cause.printStackTrace();
+                    }
                 }
             });
             watchMap.put(podName, watch);
@@ -123,28 +129,34 @@ public class PodManager {
         }
     }
 
-    private void notifySuccess(String imageName, String podName, String namespace,String[] configMapNames) {
+    private void notifySuccess(String imageName) {
         // TODO:发送成功通知到调用方
 //        rocketMQProducer.sendSuccessMessage(TOPIC,imageName);
         System.out.println("Image build successful.");
-        clearResources(configMapNames,podName,namespace);
     }
 
-    private void notifyFailure(String imageName, String podName, String namespace,String[] configMapNames) {
+    private void notifyFailure(String imageName) {
         // 发送失败通知到调用方
 //        String reason = queryLog(podName, namespace);
 //        rocketMQProducer.sendFailureMessage(TOPIC,imageName,reason);
         System.out.println("Image build failed.");
-        clearResources(configMapNames,podName,namespace);
     }
 
-    private void clearResources(String[] configMapNames,String podName, String namespace ){
-        //清除相关资源
-        configMapManager.deleteConfigMap(configMapNames[0],namespace);
-        configMapManager.deleteConfigMap(configMapNames[1],namespace);
-        client.pods().inNamespace(namespace).withName(podName).delete();
-        Watch watch = watchMap.remove(podName);
-        watch.close();
+    private void clearResources(String[] configMapNames,String podName, String namespace,Watch watch){
+
+        try{
+            System.out.println("开始清除资源-----------------------");
+            configMapManager.deleteConfigMap(configMapNames[0],namespace);
+            configMapManager.deleteConfigMap(configMapNames[1],namespace);
+            client.pods().inNamespace(namespace).withName(podName).delete();
+            watch.close();
+        } catch (Exception e) {
+            System.out.println("清理资源失败：" + e.getMessage());
+        } finally {
+            // 确保释放信号量，即使发生异常
+            semaphoreRateLimiter.release();
+        }
+
     }
 
     private boolean isNotEmpty(String str) {
@@ -157,7 +169,7 @@ public class PodManager {
         return new PodBuilder()
                 .withNewMetadata()
                 .withName(podName)
-                .withNamespace(kanikoUtil.getNamespace())
+                .withNamespace(applicationProperties.getNamespace())
                 .endMetadata()
                 .withNewSpec()
                 .withContainers(createKanikoContainer(kanikoDTO))
@@ -169,15 +181,15 @@ public class PodManager {
     private Container createKanikoContainer(KanikoDTO kanikoDTO) {
         return new ContainerBuilder()
                 .withName("kaniko")
-                .withImage(kanikoUtil.getKanikoImage()) // 指定 Kaniko 镜像
+                .withImage(applicationProperties.getKanikoImage()) // 指定 Kaniko 镜像
                 .withImagePullPolicy("IfNotPresent")
                 .withArgs(
                         String.format("--context=git://$(GIT_USERNAME):$(GIT_PASSWORD)@%s#%s", kanikoDTO.getGitRepoUrl(), kanikoDTO.getBranchName()),
                         "--dockerfile=Dockerfile",
-                        "--destination="+kanikoUtil.getDockerRegistry()+kanikoDTO.getImageName(),
+                        "--destination="+ applicationProperties.getDockerRegistry()+kanikoDTO.getImageName(),
                         "--cache=true",
-                        "--cache-repo="+kanikoUtil.getCacheRepo(),
-                        "--registry-mirror="+kanikoUtil.getRegistryMirror()
+                        "--cache-repo="+ applicationProperties.getCacheRepo(),
+                        "--registry-mirror="+ applicationProperties.getRegistryMirror()
                 )
                 .withEnv(createEnvVars())
                 .withVolumeMounts(createVolumeMounts(kanikoDTO))
@@ -189,13 +201,13 @@ public class PodManager {
                 new EnvVarBuilder()
                         .withName("GIT_USERNAME")
                         .withNewValueFrom()
-                        .withNewSecretKeyRef("username", kanikoUtil.getGitlabCredentials(), false)
+                        .withNewSecretKeyRef("username", applicationProperties.getGitlabCredentials(), false)
                         .endValueFrom()
                         .build(),
                 new EnvVarBuilder()
                         .withName("GIT_PASSWORD")
                         .withNewValueFrom()
-                        .withNewSecretKeyRef("password", kanikoUtil.getGitlabCredentials(), false)
+                        .withNewSecretKeyRef("password", applicationProperties.getGitlabCredentials(), false)
                         .endValueFrom()
                         .build(),
                 new EnvVarBuilder()
@@ -260,7 +272,7 @@ public class PodManager {
                                 .withSources(
                                         new VolumeProjectionBuilder()
                                                 .withSecret(new SecretProjectionBuilder()
-                                                        .withName(kanikoUtil.getSecretName())
+                                                        .withName(applicationProperties.getSecretName())
                                                         .withItems(new KeyToPathBuilder()
                                                                 .withKey(".dockerconfigjson")
                                                                 .withPath("config.json")
